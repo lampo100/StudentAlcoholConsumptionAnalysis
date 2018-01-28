@@ -1,0 +1,369 @@
+---
+title: "MOW"
+author: "Kacper Kamiński"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+```{r echo=FALSE, warning=FALSE, error=FALSE, message=FALSE}
+library(dplyr)
+source("util.R")
+library(lattice)
+library(ggplot2)
+library(MASS)
+library(caret)
+```
+
+# Przygotowanie danych
+Pierwszą czynnością którą należy wykonać przed przystąpieniem do analizy jest scalenie tabeli zawierających informacje na temat studentów kursu matematyki oraz studentów kursu języka portugalskiego bez duplikowania informacji o studentach uczęszczających na oba kursy.
+```{r warning=FALSE, echo=FALSE}
+math_students = read.csv('student-mat.csv')
+port_students = read.csv('student-por.csv')
+# Scalamy tablice bez duplikatów
+students <- rbind(math_students, port_students)
+students <- distinct(students,school,sex,age,address,famsize,Pstatus,
+                             Medu,Fedu,Mjob,Fjob,reason,nursery,internet,
+                         .keep_all = TRUE)
+```
+
+## Podział danych na zbiór treningowy i testowy
+Następnie dzielimy nasze dane na zbiór treningowy oraz zbiór testowy. 80% danych zostanie używa do wytrenowania naszych modeli, natomiast 20% do ich testowania.
+```{r echo=FALSE, cache=TRUE}
+# Przewidywana wartość musi być klasy Factor
+students$Dalc <- as.factor(students$Dalc)
+# Tworzymy zbiór trenujący
+smp_size <- floor(0.80 * nrow(students))
+train_ind <- sample(seq_len(nrow(students)), size = smp_size)
+train <- students[train_ind, ]
+# Oraz zbiór testujący
+test <- students[-train_ind, ]
+```
+
+# Przewidywanie spożycia alkoholu w dni robocze
+Na początek zajmiemy się przewidywaniem spożycia alkoholu wśród studentów w dni robocze. W tym celu użyjemy funkcji `polr` z pakietu `MASS` do wytrenowania modelu regresji porządkowej. Uważamy że model ten jest bardziej adekwatny do predykcji tego atrybutu, niż przykładowo one-vs-all, ponieważ jego wartości nie są oddalone od siebie w równych odległościach. Nie możemy stwierdzić że między 1 a 2 jest taka sama różnica jak między 4 a 5.
+Początkowo do regresji atrybutu Dalc użyjemy wszystkich pozostałych atrybutów, z wyjątkiem atrybutu Walc, którego predykcją zajmować się będziemy potem. Pozwoli nam to w pewnym stopniu porównać ze sobą spożycie alkoholu w weekend oraz w tygodniu.
+
+## Trenowanie modelu i interpretacja statystyk
+Poniżej widnieje wywołanie funkcji tworzącej nasz model.
+```{r, cache=TRUE}
+m <- polr(Dalc ~ sex + age + address + famsize + Pstatus + Medu + Fedu + Mjob + Fjob 
+          + reason + guardian + traveltime + studytime + failures + schoolsup + famsup 
+          + activities + nursery + higher + internet + romantic + famrel + freetime 
+          + goout + health + absences + G1 + G2 + G3, data=train, Hess=TRUE,
+          method='logistic')
+```
+Po wytrenowaniu naszego modelu wyświetlimy jego statystyki.
+```{r echo=FALSE, cache=TRUE}
+summary(m)
+```
+W dostępnych tabelkach widać odpowiednio:  
+
+* Tabelkę współczynników zawierającą ich wartości, odchylenie standardowe oraz t-wartość.
+* Tabelkę punktów przecięcia, także zawierającą ich wartości, odchylenie standardowe oraz t-wartość. Punkty przecięcia mówią nam w których miejscach następuje zmiana klas, jednakże nie będą one przydatne w naszej analizie.
+* Residual Deviance mówiące jak dobrze nasz model dopasowany jest do naszych danych.
+* AIC(Akaike information criterion) - jest to wartość określająca względną jakość modelu dla określonych danych. Jest ona przydatna przy podejmowaniu decyzji, który z naszych modeli wytrenowanych na tym samym zbiorze danych wybrać. Zwyczajowo powinniśmy wybrać model z najmniejszą wartością AIC.
+
+Interesującym faktem wartym zaznaczenia jest także to, że funkcja `polr` w celu wytrenowania modelu rozbiła automatycznie nasze niebinarne, dyskretne atrybuty na wiele binarnych atrybutów zamiennych. Przykładowo atrybut `reason` określający powód dla którego student wybrał szkołę w której przeprowadzono ankietę, został rozbity na atrybuty `reasonhome`, `reasonother` oraz `reasonreputation`.
+
+## Badanie dopasowania modelu do danych treningowych
+Jak widać ze statystyk podana jest także wartość `Residual Deviance`. Możemy na podstawie tej wartości oraz wartości stopni swobody naszego modelu wykonać test chi-kwadrat i przekonać się czy nasza hipoteza zerowa zakładająca, że nasz model dobrze oddaje nasze dane, jest prawdziwa.
+
+W tym celu znajdujemy ilość stopni swobody.
+```{r echo=FALSE, cache=TRUE}
+model.df <- df.residual(m)
+sprintf("Ilość stopni swobody modelu: %d", model.df)
+```
+A następnie wykonujemy test chi-kwadrat.
+```{r echo=FALSE, cache=TRUE}
+p <- 1-pchisq(deviance(m), model.df)
+sprintf("Wynik testu chi-kwadrat wartości residual deviance: p-value = %.2f", p)
+```
+W wyniku naszego testu otrzymaliśmy p-wartość równą zero. Wynik ten oznacza że musimy odrzucić naszą hipotezę, że nasz model jest dobrze dopasowany do danych treningowych. Nie oznacza to jednakże, że jest on zły. W przypadku naszych danych pokazuje on, że przy dużej ilości atrybutów ciężko jest dopasować linię regresji tak, aby była ona zbliżona do wszystkich naszych przykładów.
+
+Dla potwierdzenia założenia, że pomimo powyższego wyniku testu chi-kwadrat nasz model regresji może być użyteczny obliczymy jego dokładność na zbiorze trenującym oraz na zbiorze testowym.
+```{r echo=FALSE, cache=TRUE}
+train.acc <- accuracy(train[, "Dalc"], predict(m, train))
+test.acc <- accuracy(test[, "Dalc"], predict(m, test))
+sprintf("Dokładność modelu na zbiorze treningowym wynosi: %.2f%%",train.acc*100)
+sprintf("Dokładność modelu na zbiorze testowym wynosi: %.2f%%", test.acc*100)
+```
+Jak widać po wynikach nasz model okazał się być dość dokładny i dla zbioru treningowego jak i dla testowego. Pokazuje to że pomimo jego niedopasowania jest on w stanie dokonać dokładnych predykcji.
+Dodatkowo możemy zauważyć że dokładność naszego modelu na zbiorze testowym jest zbliżona do dokładności na zbiorze treningowym.
+Jest to korzystny fakt, ponieważ oznacza on, że nie doszło do sytuacji nadmiernego dopasowania do zbioru treningowego, kosztem dokładności na zbiorze testowym.
+
+Poniżej pokazano wykres przewidywanych oraz prawdziwych wartości dla pierwszych 30 przykładów na zbiorze testowym. 
+
+```{r echo=FALSE, cache=TRUE}
+display.prediction.plot(m, test, "Dalc", 30)
+```
+
+Oglądając wykres możemy zacząć podejrzewać, że nasz model ma problem z przewidywaniem wyższych poziomów spożycia alkoholu. Żeby się przekonać czy jest to prawda wyświetlimy tablicę pomyłek.
+```{r echo=FALSE, cache=TRUE}
+predicted <- predict(m, test)
+real <- test[,"Dalc"]
+table(real, predicted)
+```
+Z tablicy pomyłek wynika że nasz model stosunkowo dobrze radzi sobie z predykcją niskiego spożycia alkoholu, jednakże nieco gorzej idzie mu z predykcją wysokiego spożycia. Na 133 przykłady gdzie poziom spożycia alkoholu wynosił 2 lub więcej nasz model pomylił się aż w ponad 20 przypadkach przydzielając je do klasy 1 - niskiego spożycia alkoholu. Jak widać ma on tendencję do zaniżania rzeczywistych wartości.
+
+## Analiza p-wartości współczynników
+
+Aby zbadać poziom istotności naszych zmiennych niezależnych obliczymy ich p-wartości używając z-testu (możemy go użyć w praktyce pomimo niespełnienia wszystkich formalnych wymagań z powodu dużej liczby przykładów w zbiorze trenującym) a następnie dołączamy je do tabeli podsumowującej nasz model.
+
+P-wartość mówi nam czy hipoteza zerowa mówiąca że atrybut jest nieskorelowany z naszym przewidywanym atrybutem jest prawdziwa czy nie. Często przed wyliczeniem p-wartości dla każdego atrybutu, ustala się poziom istotności $\alpha$ powyżej którego atrybut jest uznawany za nieistotny statystycznie i odrzucany z modelu. Możemy ten sam eksperyment wykonać także i dla naszego modelu.
+Przyjmiemy w tym celu standardową wartość $\alpha=5\%$
+```{r echo=FALSE, cache=TRUE}
+ctable <- coef(summary(m))
+p.values <- pnorm(abs(ctable[, "t value"]), lower.tail = FALSE) * 2
+ctable <- cbind(ctable, "p value" = p.values)
+ctable
+```
+
+Po obliczeniu p-wartości dla naszych współczynników, usuwamy z tabelki te które przekraczają naszą ustaloną wartość $\alpha=5\%$ i wyświetlamy pozostałe współczynniki.
+```{r echo=FALSE, cache=TRUE}
+insignificant_variables <- ctable[,"p value"] > 0.05
+significat_variables <- ctable[!insignificant_variables,]
+significat_variables
+```
+Dla eksperymentu możemy utworzyć nowy model składający się jedynie z pozostałych współczynników i przekonać się czy powstały model straci na dokładności z powodu mniejszej ilości atrybutów czy też nie, a także czy będzie on lepiej dopasowany do naszych danych czy nie.
+
+Poniżej pokazane jest wywołanie funkcji tworzącej drugi model.
+```{r, cache=TRUE}
+m2 <- polr(Dalc ~ sex + famsize + reason + guardian + famrel + goout 
+            + absences, data=train, Hess=TRUE, method='logistic')
+```
+Najpierw wykonujemy test chi-kwadrat aby sprawdzić jak dobrze dopasowany jest on do naszych danych a następnie wyświetlimy p-wartość naszego pierwszego modelu oraz p-wartość naszego drugiego modelu.
+```{r echo=FALSE, cache=TRUE}
+p2 <- 1-pchisq(deviance(m2),df.residual(m2))
+sprintf("P-wartość pierwszego modelu: %.2f", p)
+sprintf("P-wartość drugiego modelu: %.2f", p2)
+```
+Jak widać nawet nasz drugi model nie przeszedł testu dopasowania chi-kwadrat. Tak jak i poprzednio nie znaczy to jednakże że jest on błędny, a jedynie to że przy takiej ilości zmiennych niezależnych i rozrzuceniu wartości, dopasowanie naszej krzywej regresji do danych jest bardzo ciężkie.
+
+Następnie obliczymy dokładność naszego drugiego modelu i porównamy ją z dokładnością naszego pierwszego modelu którą obliczyliśmy wcześniej.
+```{r echo=FALSE, cache=TRUE}
+train.acc2 <- accuracy(train[,"Dalc"], predict(m2, train))
+test.acc2 <- accuracy(test[, "Dalc"], predict(m2, test))
+sprintf("Dokładność pierwszego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc*100)
+sprintf("Dokładność pierwszego modelu na zbiorze testowym wynosi: %.2f%%", test.acc*100)
+sprintf("Dokładność drugiego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc2*100)
+sprintf("Dokładność drugiego modelu na zbiorze testowym wynosi: %.2f%%", test.acc2*100)
+```
+Okazuje się że po zmniejszeniu ilości zmiennych niezależnych w naszym modelu, nasz model różni się nieznacznie dokładnością na obu zbiorach.
+
+Także i w tym modelu wyświetlimy wykres przewidywanych oraz prawdziwych wartości dla pierwszych 30 przykładów.
+
+```{r echo=FALSE}
+display.prediction.plot(m2, test, "Dalc", 30)
+```
+
+Także i dla tego modelu wyświetlimy tablicę pomyłek, aby przekonać się czy nie zmieniła się tendencja do przewidywania niższego niż w rzeczywistości spożycia alkoholu.
+
+```{r echo=FALSE, cache=TRUE}
+predicted <- predict(m2, test)
+real <- test[,"Dalc"]
+table(real, predicted)
+```
+
+Z tablicy pomyłek wynika że także i ten model posiada ten sam problem.
+
+## StepAIC
+Jednym z problemów który poruszyliśmy przed chwilą jest wybór których atrybutów używać do tworzenia modelu. Nasze wcześniejsze podejście z pominięciem atrybutów których p-wartość przekracza z góry ustaloną wartość $\alpha=5\%$ jest nieco naiwna. Lepszym sposobem może być wykorzystanie funkcji stepAIC która tworzy wiele modeli wykorzystując różne kombinacje atrybutów i wyświetla ich wartości AIC. Możemy następnie wybrać model z najniższą wartością AIC który powinien być potencjalnie najlepszy. Należy zauważyć że wartość AIC nie mówi nam jak ogólnie dobry jest nasz model, lecz jak dobry jest względem innych modeli. Przez to jeżeli wszystkie potencjalne modele są słabo dopasowane, będziemy mieli jedynie informację który z nich jest najlepiej dopasowany względem innych modeli, a nie czy jest dobrze dopasowany.
+```{r, echo=FALSE, results="hide", cache=TRUE}
+stepAIC(m, trace=-1)
+```
+Na podstawie analizy funkcją stepAIC otrzymujemy formułę o najmniejszej wartości AIC. Utworzymy nowy model używając jej.
+```{r, cache=TRUE}
+m3 <- polr(formula = Dalc ~ sex + address + famsize + reason + guardian + 
+    famrel + goout + absences + G3, data = train, Hess = TRUE, 
+    method = "logistic")
+```
+Wyświetlimy statystyki.
+```{r echo=FALSE}
+summary(m3)
+```
+Tak jak uprzednio dokonamy testu chi-kwadrat dopasowania do danych aby przekonać się, czy model jest dobrze dopasowany do danych.
+```{r echo=FALSE}
+p3 <- 1-pchisq(deviance(m3),df.residual(m3))
+sprintf("p-wartość modelu: %.2f", p3)
+```
+Oraz obliczymy dokładność na zbiorze treningowym i testowym i zestawimy z wartościami poprzednich modeli.
+```{r echo=FALSE, cache=TRUE}
+train.acc3 <- accuracy(train[, "Dalc"], predict(m3, train))
+test.acc3 <- accuracy(test[, "Dalc"], predict(m3, test))
+sprintf("Dokładność pierwszego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc*100)
+sprintf("Dokładność pierwszego modelu na zbiorze testowym wynosi: %.2f%%", test.acc*100)
+sprintf("Dokładność drugiego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc2*100)
+sprintf("Dokładność drugiego modelu na zbiorze testowym wynosi: %.2f%%", test.acc2*100)
+sprintf("Dokładność trzeciego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc3*100)
+sprintf("Dokładność trzeciego modelu na zbiorze testowym wynosi: %.2f%%", test.acc3*100)
+
+```
+Jak widać dokładność naszego trzeciego modelu wybranego z użyciem funkcji stepAIC jest zbliżona do dokładności poprzednich dwóch modeli. Wynika z tego że równie dobrą decyzją może być utworzenie modelu używając wszystkich dostępnych atrybutów, tych których p-wartość jest wystarczająco niska albo tych wybranych z użyciem funkcji stepAIC
+
+# Przewidywanie spożycia alkoholu w weekend
+Analogicznie postaramy się przeprowadzić regresję drugiego atrybutu. Tym razem będzie to regresja spożycia alkoholu w weekend.
+Tak samo jak i wcześniej zaczniemy od utworzenia modelu z użyciem wszystkich(tym razem z wyjątkiem Dalc) atrybutów i wyświetlimy jego statystyki.
+
+## Trenowanie modelu i interpretacja statystyk
+Poniżej widnieje wywołanie funkcji tworzącej nasz model.
+```{r echo=FALSE}
+train$Walc <- as.factor(train$Walc)
+test$Walc <- as.factor(test$Walc)
+```
+
+```{r, cache=TRUE}
+m4 <- polr(Walc ~ sex + age + address + famsize + Pstatus + Medu + Fedu + Mjob + Fjob 
+          + reason + guardian + traveltime + studytime + failures + schoolsup + famsup 
+          + activities + nursery + higher + internet + romantic + famrel + freetime 
+          + goout + health + absences + G1 + G2 + G3, data=train, Hess=TRUE,
+          method='logistic')
+```
+Po wytrenowaniu naszego modelu wyświetlimy jego statystyki.
+```{r echo=FALSE, cache=TRUE}
+summary(m4)
+```
+
+## Badanie dopasowania modelu do danych treningowych
+Także teraz możemy na podstawie wartości Residual Deviance oraz wartości stopni swobody naszego modelu wykonać test chi-kwadrat i przekonać się czy nasza hipoteza zerowa zakładająca, że nasz model dobrze oddaje nasze dane, jest prawdziwa.
+
+W tym celu znajdujemy ilość stopni swobody.
+```{r echo=FALSE, cache=TRUE}
+model.df <- df.residual(m)
+sprintf("Ilość stopni swobody modelu: %d", model.df)
+```
+A następnie wykonujemy test chi-kwadrat.
+```{r echo=FALSE, cache=TRUE}
+p4 <- 1-pchisq(deviance(m), model.df)
+sprintf("Wynik testu chi-kwadrat wartości residual deviance: p-value = %.2f", p4)
+```
+Także i ten model nie przeszedł testu chi-kwadrat. Tak jak i poprzednio przekonamy się jednakże czy udaje mu się przewidzieć z dobrą dokładnością poziom spożycia alkoholu.
+
+```{r echo=FALSE, cache=TRUE}
+train.acc4 <- accuracy(train[, "Walc"], predict(m4, train))
+test.acc4 <- accuracy(test[, "Walc"], predict(m4, test))
+sprintf("Dokładność modelu na zbiorze treningowym wynosi: %.2f%%",train.acc4*100)
+sprintf("Dokładność modelu na zbiorze testowym wynosi: %.2f%%", test.acc4*100)
+```
+Okazuje się że model regresji spożycia alkoholu w weekend jest zdecydowanie mniej dokładny niż model regresji spożycia alkoholu w tygodniu. Nie są to jednakże bardzo niskie wartości jakich można by się spodziewać po modelu całkowicie niedopasowanym dla danych.
+
+Poniżej pokazano wykres przewidywanych oraz prawdziwych wartości dla pierwszych 30 przykładów na zbiorze testowym.  
+
+```{r echo=FALSE, cache=TRUE}
+display.prediction.plot(m, test, "Walc", 30)
+```
+  
+Oglądając wykres widzimy już dlaczego dokładność modelu regresji spożycia alkoholu w weekend jest o wiele gorsza. Tak samo jak i w przypadku modeli regresji spożycia alkoholu w tygodniu nasz obecny model ma problem z przewidywaniem niższych poziomów niż w rzeczywistości. W porównaniu jednakże do poprzednich modeli aktualny model jest z tego powodu w gorszej sytuacji, ponieważ rzeczywiste spożycie alkoholu w weekend jest zdecydowanie większe niż w tygodniu. Można podejrzewać że wiąże się to z różnymi imprezami które odbywają się w tym czasie, jednakże jest to nasze podejrzenie niewynikające z samych analizowanych danych.
+
+Wyświetlmy jeszcze tablicę pomyłek dla naszego modelu.
+```{r echo=FALSE, cache=TRUE}
+predicted <- predict(m4, test)
+real <- test[,"Walc"]
+table(real, predicted)
+```
+Jak widać z tablicy pomyłek, tendencja modelu do zaniżania poziomu spożycia alkoholu w weekend jest rzeczywista.
+
+## Analiza p-wartości współczynników
+
+Spróbujemy przekonać się czy może w przypadku regresji tego atrybutu, utworzenie modelu z użyciem atrybutów o wystarczająca małej p-wartości zwiększy jego dokładność czy nie.
+Przyjmiemy w tym celu standardową wartość $\alpha=5\%$
+```{r echo=FALSE, cache=TRUE}
+ctable <- coef(summary(m4))
+p.values <- pnorm(abs(ctable[, "t value"]), lower.tail = FALSE) * 2
+ctable <- cbind(ctable, "p value" = p.values)
+ctable
+```
+
+Po obliczeniu p-wartości dla naszych współczynników, usuwamy z tabelki te które przekraczają naszą ustaloną wartość $\alpha=5\%$ i wyświetlamy pozostałe współczynniki.
+```{r echo=FALSE, cache=TRUE}
+insignificant_variables <- ctable[,"p value"] > 0.05
+significat_variables <- ctable[!insignificant_variables,]
+significat_variables
+```
+Utworzymy teraz model składający się tylko z atrybutów które przeszły test.
+
+Poniżej pokazane jest wywołanie funkcji tworzącej drugi model.
+```{r, cache=TRUE}
+m5 <- polr(Walc ~ sex + Medu + Fjob + guardian + studytime + goout 
+            + absences, data=train, Hess=TRUE, method='logistic')
+```
+Tak jak i poprzednio zaczniemy od testu dopasowania naszego modelu do danych.
+```{r echo=FALSE, cache=TRUE}
+p5 <- 1-pchisq(deviance(m5),df.residual(m5))
+sprintf("P-wartość drugiego modelu: %.2f", p5)
+```
+Jak widać nawet nasz drugi model nie przeszedł testu dopasowania chi-kwadrat.
+
+Następnie obliczymy dokładność naszego drugiego modelu i porównamy ją z dokładnością naszego pierwszego modelu którą obliczyliśmy wcześniej.
+```{r echo=FALSE, cache=TRUE}
+train.acc5 <- accuracy(train[,"Walc"], predict(m5, train))
+test.acc5 <- accuracy(test[, "Walc"], predict(m5, test))
+sprintf("Dokładność pierwszego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc4*100)
+sprintf("Dokładność pierwszego modelu na zbiorze testowym wynosi: %.2f%%", test.acc4*100)
+sprintf("Dokładność drugiego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc5*100)
+sprintf("Dokładność drugiego modelu na zbiorze testowym wynosi: %.2f%%", test.acc5*100)
+```
+Okazuje się że po zmniejszeniu ilości zmiennych niezależnych w naszym modelu, nasz model różni się nieznacznie dokładnością na obu zbiorach. Jak widać także i dla regresji tego modelu podejście z wybraniem tylko i wyłącznie atrybutów o wystarczająco niskiej p-wartości nie było wystarczające.
+
+Wyświetlmy jeszcze wykres zestawiający wartości przewidziane oraz rzeczywiste dla 30 przykładów.
+```{r echo=FALSE}
+display.prediction.plot(m5, test, "Walc", 30)
+```
+
+Także i tutaj wyświetlimy tablicę pomyłek, aby przekonać się czy nie zmieniła się tendencja do przewidywania niższego niż w rzeczywistości spożycia alkoholu.
+```{r echo=FALSE, cache=TRUE}
+predicted <- predict(m5, test)
+real <- test[,"Walc"]
+table(real, predicted)
+```
+Z tablicy pomyłek wynika że po raz kolejny otrzymaliśmy model z tendencją do zaniżania poziomu spożycia alkoholu.
+
+## StepAIC
+Spróbujemy także i teraz skorzystać z funkcji stepAIC w nadziei że otrzymamy nieco lepszy model.
+```{r, echo=FALSE, results="hide", cache=TRUE}
+stepAIC(m4, trace=-1)
+```
+Na podstawie analizy funkcją stepAIC otrzymujemy formułę o najmniejszej wartości AIC. Utworzymy nowy model używając jej.
+```{r, cache=TRUE}
+m6 <- polr(formula = Walc ~ sex + Medu + Fedu + Fjob + reason + guardian + 
+    studytime + schoolsup + activities + nursery + famrel + goout + 
+    health + absences + G1, data = train, Hess = TRUE, method = "logistic")
+```
+Wyświetlimy statystyki.
+```{r echo=FALSE}
+summary(m6)
+```
+Następnie zgodnie ze zwyczajem sprawdzimy dopasowanie modelu do danych.
+```{r echo=FALSE}
+p6 <- 1-pchisq(deviance(m6),df.residual(m6))
+sprintf("p-wartość: %.2f", p6)
+```
+Oraz obliczymy dokładność na zbiorze treningowym i testowym i zestawimy z wartościami poprzednich modeli.
+```{r echo=FALSE, cache=TRUE}
+train.acc6 <- accuracy(train[, "Walc"], predict(m6, train))
+test.acc6 <- accuracy(test[, "Walc"], predict(m6, test))
+sprintf("Dokładność pierwszego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc4*100)
+sprintf("Dokładność pierwszego modelu na zbiorze testowym wynosi: %.2f%%", test.acc4*100)
+sprintf("Dokładność drugiego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc5*100)
+sprintf("Dokładność drugiego modelu na zbiorze testowym wynosi: %.2f%%", test.acc5*100)
+sprintf("Dokładność trzeciego modelu na zbiorze treningowym wynosi: %.2f%%",train.acc6*100)
+sprintf("Dokładność trzeciego modelu na zbiorze testowym wynosi: %.2f%%", test.acc6*100)
+
+```
+Jak widać dokładność naszego trzeciego modelu wybranego z użyciem funkcji stepAIC jest także i teraz zbliżona do wartości poprzednich modeli. Wynika z tego że także i w przypadku regresji atrybutu Walc nie jest łatwo stwierdzić, których atrybutów warto użyć.
+
+# Wnioski
+W projekcie tym staraliśmy odpowiedzieć między innymi na takie pytania jak:  
+
+* Czy model regresji musi być koniecznie dobrze dopasowany do danych, aby posiadać wysoką dokładność?
+* Jak porównać ze sobą różne modele?
+* Jak wybrać atrybuty przy tworzeniu naszego modelu?
+* Gdzie nasze modele popełniają błąd?
+
+Nauczyliśmy się dzięki temu wielu rzeczy. Teoretycznych, związanych ze statystyką, jak np. interpetacja takich wartości jak p-value, AIC, Residual Deviance, ale także praktycznych, czyli jak ich używać w doborze modelu oraz atrybutów.
+
+Jeżeli chodzi o same dane które analizowaliśmy to dowiedzieliśmy się ciekawych rzeczy, jak przykładowo to że w przypadku ankietowanej grupy mężczyźni mieli zdecydowanie większe szanse na picie alkoholu niż kobiety.
+
+## Dalsza możliwa analiza
+Innymi rzeczami które warte byłyby zbadania jest przykładowo regresja tych atrybutów z użyciem innych modeli, np. one-vs-all i przekonanie się czy ich dokładność jest gorsze czy lepsza, a także to czy metody wyboru modeli analizowane przez nas w tym projekcie działają dla nich lepiej czy gorzej.
+
+Rzeczą wartą analizy byłaby także próba zmodyfikowania naszych modeli w taki sposób, aby nie posiadały one znalezionej przez nas tendencji do zaniżania przewidywanego poziomu spożycia alkoholu. Byłoby to zwłaszcza korzystne dla regresji spożycia alkoholu w weekend.
